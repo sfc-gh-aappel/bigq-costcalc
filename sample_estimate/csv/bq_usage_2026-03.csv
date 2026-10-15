@@ -1,0 +1,8 @@
+project_id,year_month,total_slot_ms,active_minutes_in_month,pct_of_month_active
+analytics-prod,2026-03,1411368954596,30119.7,67.47
+etl-pipelines,2026-03,1163043412161,30553.6,68.44
+data-science,2026-03,849806987855,24091.1,53.97
+marketing-bi,2026-03,451795127258,23246.1,52.07
+adhoc-sandbox,2026-03,807209864503,6612.4,14.81
+finance-reports,2026-03,486520534003,5115.6,11.46
+partner-share,2026-03,228363509823,4125.8,9.24

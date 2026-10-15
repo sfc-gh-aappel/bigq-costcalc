@@ -1,0 +1,6 @@
+[project]
+name = "bigquery-to-snowflake-estimate"
+version = "0.1.0"
+description = "Estimate Snowflake compute and storage cost from BigQuery usage exports"
+requires-python = ">=3.11"
+dependencies = []

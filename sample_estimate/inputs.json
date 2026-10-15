@@ -1,0 +1,19 @@
+{
+  "customer": "Sample Retail Co",
+  "initial_storage_tb": 50,
+  "tt_fs_pct": 0.08,
+  "price_per_tb": 23.0,
+  "storage_growth": [
+    0.127,
+    0.1,
+    0.08
+  ],
+  "price_per_credit": 4.0,
+  "compute_growth": [
+    0.05,
+    0.07,
+    0.07
+  ],
+  "low_factor": 0.8,
+  "high_factor": 1.2
+}

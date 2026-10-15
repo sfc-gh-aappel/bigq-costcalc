@@ -1,0 +1,9 @@
+{
+  "analytics-prod": "RES",
+  "etl-pipelines": "RES",
+  "data-science": "RES",
+  "marketing-bi": "RES",
+  "adhoc-sandbox": "OD",
+  "finance-reports": "OD",
+  "partner-share": "OD"
+}
