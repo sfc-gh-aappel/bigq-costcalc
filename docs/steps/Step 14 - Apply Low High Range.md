@@ -1,54 +1,28 @@
-# Step 14 — Apply Low / High Range
+# Step 14 - Apply Low High Range
+
+**Applies to:** Projection
 
 ## Purpose
 
-Apply a confidence band around the calculated estimate to account for the inherent uncertainty in the conversion assumptions.
+Put an estimation range around each year's total.
 
-## Why This Matters
-
-This estimate rests on several assumptions — the 16-slots-to-1-X-Small-node comparison, utilization percentages, growth rates, and the time travel / failsafe %. None of these are exact. Presenting a range rather than a single number sets the right expectation with the customer and gives the account team room to position the estimate honestly.
-
-## Inputs
-
-| Input | Source | Description |
-|---|---|---|
-| Year 1, 2, 3 Total Cost | Step 13 | Calculated annual cost for each year |
-| Low Range Factor | Assumption | Lower bound multiplier (default: 0.80) |
-| High Range Factor | Assumption | Upper bound multiplier (default: 1.20) |
-
-## Formulas
+## Formula
 
 ```
-Low Estimate  = Calculated Total x 0.80
-High Estimate = Calculated Total x 1.20
+Low = Year Total x Low %
+High = Year Total x High %
 ```
-
-## Final Output Table
-
-Present the estimate in this format:
-
-| | Year 1 | Year 2 | Year 3 |
-|---|---|---|---|
-| **Low (80%)** | $X | $Y | $Z |
-| **Calculated** | $X | $Y | $Z |
-| **High (120%)** | $X | $Y | $Z |
 
 ## Example
 
-Sample Retail Co:
+Sample Retail Co, 7 observed months (March-September 2026), $4.00 per credit.
 
-| | Year 1 | Year 2 | Year 3 |
-|---|---|---|---|
-| **Low (80%)** | $1,800,983 | $1,911,277 | $2,045,332 |
-| **Calculated** | $2,251,228 | $2,389,096 | $2,556,665 |
-| **High (120%)** | $2,701,474 | $2,866,915 | $3,067,998 |
+Year 1: $1,903,908 - $2,855,861; Year 2: $2,020,468 - $3,030,702; Year 3: $2,162,167 - $3,243,250
 
 ## Notes
 
-- The 80%/120% range is a starting point. Widen it if the input data quality is low or the observation period is short.
-- If the customer has seasonal workloads not captured in the observation window, consider adjusting the range or noting the gap.
-- This range applies to the **total** (storage + compute). You can also present ranges separately if one component has more uncertainty than the other.
+Default range is 80% / 120%. Widen it if the source data is incomplete.
 
-## Summary
+## Next Step
 
-This is the final deliverable — a three-year Snowflake cost projection with a defensible low/high range, backed by the customer's actual BigQuery consumption data.
+Done. See the [Calculation Guide](../BigQuery%20to%20Snowflake%20Cost%20Estimation%20-%20Calculation%20Guide.md).

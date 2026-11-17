@@ -1,51 +1,28 @@
-# Step 10 — Project Storage Growth
+# Step 10 - Project Storage Growth
+
+**Applies to:** Projection
 
 ## Purpose
 
-Forecast storage volume month by month for the 36-month projection, using a separate annual growth rate for Year 1, Year 2, and Year 3.
+Grow storage month by month for 36 months using each year's own annual rate.
 
-## Why This Matters
-
-Data volumes don't stay flat. Applying a growth rate produces a realistic projection rather than assuming static storage. Each year can have its own rate to reflect the customer's expected data growth.
-
-## Inputs
-
-| Input | Source | Description |
-|---|---|---|
-| Month 1 Storage (TB) | Step 9 | Starting storage including time travel / failsafe |
-| Storage Growth (Year 1, 2, 3) | Assumption | Annual storage growth for each year (default: 12.7% each) |
-
-## Formulas
-
-**Convert each year's annual rate to a monthly rate:**
+## Formula
 
 ```
-Monthly Rate = (1 + Annual Rate) ^ (1/12) - 1
+Monthly Rate = (1 + Annual Growth)^(1/12) - 1
+Month N TB   = Month N-1 TB x (1 + that year's monthly rate)
 ```
-
-**Grow month by month, using the rate for the year that month falls in:**
-
-```
-Month N Storage (TB) = Month N-1 Storage x (1 + Monthly Rate for that year)
-```
-
-Months 1–12 use the Year 1 rate, 13–24 the Year 2 rate, and 25–36 the Year 3 rate.
 
 ## Example
 
-Sample Retail Co: 54 TB in month 1, growth of 12.7% / 10% / 8%:
+Sample Retail Co, 7 observed months (March-September 2026), $4.00 per credit.
 
-| Month | Storage (TB) |
-|---|---|
-| 1 | 54.0 |
-| 12 | 60.3 |
-| 24 | 66.3 |
-| 36 | 71.6 |
+Y1 12.7% -> 1.0013%/mo, Y2 10% -> 0.7974%/mo, Y3 8% -> 0.6434%/mo; month 2 = 54.54 TB; month 36 = **71.58 TB**
 
-## Output
+## Notes
 
-Monthly storage volume in TB for each of the 36 months — carried forward to Step 11 for cost calculation.
+Default storage growth is 12.7% for each year; the sample overrides Years 2 and 3.
 
 ## Next Step
 
-[Step 11 — Calculate Monthly Storage Cost](Step%2011%20-%20Calculate%20Monthly%20Storage%20Cost.md)
+[Step 11 - Monthly Storage Cost](Step%2011%20-%20Monthly%20Storage%20Cost.md)

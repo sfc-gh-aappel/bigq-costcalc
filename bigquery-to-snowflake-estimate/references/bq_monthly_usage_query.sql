@@ -1,5 +1,9 @@
 -- BigQuery to Snowflake cost estimate - usage query for the full date range
--- Returns one row per project per month (UTC). Run once and download the result as one CSV.
+-- Returns one row per project per month (UTC). Download the result as a CSV.
+-- PROJECT COVERAGE: INFORMATION_SCHEMA.JOBS covers only the project the query runs in.
+--   For every project in the organization at once, use INFORMATION_SCHEMA.JOBS_BY_ORGANIZATION in the
+--   FROM line below (needs organization-level permission). Otherwise run this query in each project.
+-- HISTORY: INFORMATION_SCHEMA.JOBS keeps about 180 days, so keep range_start inside the last ~180 days.
 DECLARE range_start DATE DEFAULT DATE '{{RANGE_START}}';
 DECLARE range_end   DATE DEFAULT DATE '{{RANGE_END}}'; -- exclusive: first day after the last month
 
@@ -22,7 +26,7 @@ jobs AS (
     -- Clip each job to its month so active time never exceeds the month
     GREATEST(j.start_time, m.month_start) AS clip_start,
     LEAST(j.end_time, m.month_end) AS clip_end
-  FROM `{{REGION}}`.INFORMATION_SCHEMA.JOBS j
+  FROM `{{REGION}}`.INFORMATION_SCHEMA.JOBS j  -- current project only; or INFORMATION_SCHEMA.JOBS_BY_ORGANIZATION j for all projects
   JOIN months m
     ON j.creation_time >= m.month_start AND j.creation_time < m.month_end
   WHERE
@@ -106,4 +110,4 @@ FROM totals t
 JOIN active_time a USING (project_id, year_month)
 JOIN active_days d USING (project_id, year_month)
 ORDER BY t.year_month, t.total_slot_ms DESC;
--- Adapted from the BigQ calculator at https://app.snowflake.com/streamlit/sfcogsops/snowhouse_aws_us_west_2/#/apps/icosbexzbmbas7a4gzfw
+-- Adapted from the BigQ calculator at https://app.snowflake.com/streamlit/sfcogsops/snowhouse_aws_us_west_2/#/apps/ki4qh2k5pei7xqdkpz7k

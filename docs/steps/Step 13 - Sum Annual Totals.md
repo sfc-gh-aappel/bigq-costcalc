@@ -1,42 +1,27 @@
-# Step 13 — Sum Annual Totals
+# Step 13 - Sum Annual Totals
+
+**Applies to:** Projection
 
 ## Purpose
 
-Add up the monthly storage and compute costs into totals for Year 1, Year 2, and Year 3.
+Add months 1-12, 13-24, and 25-36 into Year 1, 2, and 3 totals.
 
-## Why This Matters
-
-Contract negotiations and budget planning happen at an annual level. Summing the monthly projections gives the customer (and the account team) the annual figures they need for pricing discussions.
-
-## Inputs
-
-| Input | Source | Description |
-|---|---|---|
-| Monthly Storage Cost | Step 11 | Storage cost for each month (months 1–36) |
-| Monthly Compute Cost | Step 12 | Compute cost for each month (months 1–36) |
-
-## Formulas
+## Formula
 
 ```
-Year 1 Total = SUM of monthly storage + compute cost for months 1–12
-Year 2 Total = SUM of monthly storage + compute cost for months 13–24
-Year 3 Total = SUM of monthly storage + compute cost for months 25–36
+Year Total = SUM(monthly compute cost + monthly storage cost) for that year's 12 months
 ```
 
 ## Example
 
-Sample Retail Co:
+Sample Retail Co, 7 observed months (March-September 2026), $4.00 per credit.
 
-| Component | Year 1 | Year 2 | Year 3 |
-|---|---|---|---|
-| Storage | $15,753 | $17,518 | $19,077 |
-| Compute | $2,235,475 | $2,371,578 | $2,537,588 |
-| **Total** | **$2,251,228** | **$2,389,096** | **$2,556,665** |
+Year 1 $2,364,131.61 + $15,752.81 = **$2,379,884**; Year 2 **$2,525,585**; Year 3 **$2,702,708**
 
-## Output
+## Notes
 
-Annual totals for Years 1, 2, and 3 — carried forward to Step 14 for range application.
+These are projections. They will not equal the Step 7 observed total, which covers only the observed months.
 
 ## Next Step
 
-[Step 14 — Apply Low / High Range](Step%2014%20-%20Apply%20Low%20High%20Range.md)
+[Step 14 - Apply Low High Range](Step%2014%20-%20Apply%20Low%20High%20Range.md)

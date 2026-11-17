@@ -1,53 +1,29 @@
-# Step 12 — Project Compute Growth
+# Step 12 - Project Compute Growth
+
+**Applies to:** Projection
 
 ## Purpose
 
-Forecast monthly compute credits and cost for the 36-month projection, using a separate annual growth rate for Year 1, Year 2, and Year 3.
+Grow compute credits month by month from the Step 8 baseline, the same way as storage.
 
-## Why This Matters
-
-Compute workloads typically grow as the customer adds users, queries, ETL jobs, and new use cases. Applying a growth rate produces a realistic trajectory rather than a flat line.
-
-## Inputs
-
-| Input | Source | Description |
-|---|---|---|
-| Starting Monthly Credits | Step 8 | Baseline monthly credit consumption |
-| Compute Growth (Year 1, 2, 3) | Assumption | Annual compute growth for each year (default: 5% each) |
-| Price per Credit | Customer | Price per credit (default: $4.00, Business Critical list price) |
-
-## Formulas
-
-**Convert each year's annual rate to a monthly rate:**
+## Formula
 
 ```
-Monthly Rate = (1 + Annual Rate) ^ (1/12) - 1
-```
-
-Example: 5% annual = (1.05)^(1/12) - 1 = **0.41% monthly**
-
-**Grow month by month, using the rate for the year that month falls in:**
-
-```
-Month N Credits = Month N-1 Credits x (1 + Monthly Rate for that year)
-Month N Compute Cost ($) = Month N Credits x Price per Credit
+Month 1 Credits = Baseline
+Month N Credits = Month N-1 Credits x (1 + that year's monthly compute rate)
+Compute Cost    = Credits x Price per Credit
 ```
 
 ## Example
 
-Sample Retail Co: 45,538 starting credits, growth of 5% / 7% / 7%, $4.00 per credit:
+Sample Retail Co, 7 observed months (March-September 2026), $4.00 per credit.
 
-| Month | Credits | Monthly Compute Cost |
-|---|---|---|
-| 1 | 45,538 | $182,152 |
-| 12 | 47,621 | $190,484 |
-| 24 | 50,954 | $203,817 |
-| 36 | 54,521 | $218,085 |
+Y1 5% -> 0.4074%/mo, Y2/Y3 7% -> 0.5654%/mo; month 1 = 48,158.82 credits ($192,635.30); month 36 = **57,658.98 credits ($230,635.92)**
 
-## Output
+## Notes
 
-Monthly credits and compute cost for each of the 36 months — carried forward to Step 13 for annual summation.
+Default compute growth is 5% for each year; the sample overrides Years 2 and 3.
 
 ## Next Step
 
-[Step 13 — Sum Annual Totals](Step%2013%20-%20Sum%20Annual%20Totals.md)
+[Step 13 - Sum Annual Totals](Step%2013%20-%20Sum%20Annual%20Totals.md)

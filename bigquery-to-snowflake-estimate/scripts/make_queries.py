@@ -12,7 +12,7 @@ The query returns one row per project per month, so the user runs it once and do
 """
 
 import argparse
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 TEMPLATE = Path(__file__).resolve().parent.parent / "references" / "bq_monthly_usage_query.sql"
@@ -41,6 +41,10 @@ def main():
     if e <= s:
         raise SystemExit(f"Error: end date {args.end} must be after start date {args.start}")
     n_months = (e.year - s.year) * 12 + (e.month - s.month)
+    oldest = date.today() - timedelta(days=180)
+    if s < oldest:
+        print(f"WARNING: start date {s} is more than 180 days ago (before {oldest}). INFORMATION_SCHEMA.JOBS keeps "
+              f"about 180 days of history, so the earliest month(s) will be empty or partial. Use a later start date.")
 
     sql = (TEMPLATE.read_text()
            .replace("{{RANGE_START}}", s.isoformat())

@@ -4,7 +4,7 @@ estimate.py - Run the BigQuery-to-Snowflake cost estimate and build the HTML rep
 
 Usage:
     uv run --project <SKILL_DIR> python <SKILL_DIR>/scripts/estimate.py \
-        --csv <DIR_OR_FILES...> --inputs inputs.json --tags project_tags.json \
+        --csv <DIR_OR_FILES...> --inputs inputs.json \
         --start 2026-03-01 --end 2026-10-01 --out <REPORT.html> [--results <results.json>]
 
 --start is the first day of the first month; --end is the first day of the month after the
@@ -13,7 +13,6 @@ last month (exclusive). The example covers March through September.
 inputs.json keys (see SKILL.md Step 2):
     customer, initial_storage_tb, tt_fs_pct, price_per_tb, storage_growth (list of 3),
     price_per_credit, compute_growth (list of 3), low_factor, high_factor
-project_tags.json: {"<project_id>": "RES" | "OD", ...}
 """
 
 import argparse
@@ -31,7 +30,7 @@ HOURS_PER_MONTH = 730
 SLOTS_PER_XS_NODE = 16
 CREDITS_PER_XS_NODE_HOUR = 1
 PROJECTION_MONTHS = 36
-SLOT_CALCULATOR_URL = "https://app.snowflake.com/streamlit/sfcogsops/snowhouse_aws_us_west_2/#/apps/icosbexzbmbas7a4gzfw"
+SLOT_CALCULATOR_URL = "https://app.snowflake.com/streamlit/sfcogsops/snowhouse_aws_us_west_2/#/apps/ki4qh2k5pei7xqdkpz7k"
 
 DEFAULTS = {
     "tt_fs_pct": 0.0,
@@ -42,11 +41,7 @@ DEFAULTS = {
     "low_factor": 0.80,
     "high_factor": 1.20,
 }
-REQUIRED_COLS = ["project_id", "year_month", "total_slot_ms", "active_minutes_in_month",
-                 "pct_of_month_active"]
-TRACKS = ["RES", "OD"]
-TRACK_NAMES = {"RES": "Reserved slots", "OD": "On-demand", "COMBINED": "Combined",
-               "STORAGE": "Storage"}
+REQUIRED_COLS = ["project_id", "year_month", "total_slot_ms", "active_minutes_in_month"]
 
 
 # ---------------------------------------------------------------- loading / validation
@@ -98,31 +93,20 @@ def load_csvs(paths: list[str]) -> list[dict]:
     return rows
 
 
-def validate(rows: list[dict], months: list[str], tags: dict) -> list[str]:
+def validate(rows: list[dict], months: list[str]) -> list[str]:
     errors = []
     found = sorted({r["year_month"] for r in rows})
-    missing = [m for m in months if m not in found]
     extra = [m for m in found if m not in months]
-    if missing:
-        errors.append(f"Missing months: {', '.join(missing)}")
+    if not found:
+        errors.append("No data rows found")
     if extra:
         errors.append(f"Months outside the requested range: {', '.join(extra)}")
-    files_by_month = defaultdict(set)
-    for r in rows:
-        files_by_month[r["year_month"]].add(r["source_file"])
-    dup = sorted(m for m, fs in files_by_month.items() if len(fs) > 1)
-    if dup:
-        errors.append("Month(s) found in more than one file: " + ", ".join(dup))
+    # Several files are fine (e.g. one per project or per region); the same project/month twice is not.
     pairs = Counter((r["project_id"], r["year_month"]) for r in rows)
-    n_dup = sum(c - 1 for c in pairs.values() if c > 1)
-    if n_dup:
-        errors.append(f"{n_dup} duplicate project/month rows")
-    untagged = sorted({r["project_id"] for r in rows} - set(tags))
-    if untagged:
-        errors.append("Projects not tagged RES/OD: " + ", ".join(untagged))
-    bad = {p: t for p, t in tags.items() if t not in TRACKS}
-    if bad:
-        errors.append(f"Invalid tags (must be RES or OD): {bad}")
+    dups = sorted(f"{p} {m}" for (p, m), c in pairs.items() if c > 1)
+    if dups:
+        errors.append(f"{len(dups)} project/month row(s) appear more than once (same data loaded twice?): "
+                      + ", ".join(dups[:10]) + (" ..." if len(dups) > 10 else ""))
     return errors
 
 
@@ -131,47 +115,81 @@ def minutes_in_month(ym: str) -> int:
     return calendar.monthrange(y, m)[1] * 24 * 60
 
 
+def observed_span(rows: list[dict], requested: list[str]) -> tuple[list[str], list[str]]:
+    """Months used for the monthly average: every calendar month from the first to the last month in the data,
+    inclusive (same rule as the Google Slot Calculator app). Returns (span, warnings).
+    - A month inside the span with no rows counts as zero usage.
+    - Requested months before the first / after the last data month are excluded (usually outside BigQuery's
+      ~180-day job history, so their usage is unknown rather than zero)."""
+    found = sorted({r["year_month"] for r in rows})
+    span = [m for m in requested if found[0] <= m <= found[-1]]
+    warns = []
+    edge = [m for m in requested if m not in span]
+    gaps = [m for m in span if m not in found]
+    if edge:
+        warns.append(f"No data for {', '.join(edge)}: excluded from the average (likely outside BigQuery's ~180-day history).")
+    if gaps:
+        warns.append(f"No rows for {', '.join(gaps)}: counted as zero usage in the average.")
+    return span, warns
+
+
 # ---------------------------------------------------------------- calculations
 
 def monthly_rate(annual: float) -> float:
     return (1 + annual) ** (1 / 12) - 1
 
 
-def calculate(rows: list[dict], months: list[str], tags: dict, inp: dict) -> dict:
-    # Step 1 - utilization per track over every active project-month
-    util = {}
-    for t in TRACKS:
-        sub = [r for r in rows if tags[r["project_id"]] == t]
-        active = sum(r["active_minutes_in_month"] for r in sub)
-        total = float(sum(minutes_in_month(r["year_month"]) for r in sub))
-        util[t] = {"active_minutes": active, "total_minutes": total,
-                   "pct": active / total if total else 0.0,
-                   "project_months": len(sub)}
-
+def calculate(rows: list[dict], months: list[str], inp: dict) -> dict:
+    # Step 1 - PER PROJECT-MONTH. Each row is calculated on its own with that project's own measured
+    # wall-clock active time, so a busy project and an idle project are never averaged together:
+    #   X-Small nodes = slot ms / 3,600,000 / 730 / 16
+    #   active hours  = active_minutes_in_month / 60   (capped at the hours in that calendar month)
+    #   credits       = X-Small nodes x active hours x 1 credit per X-Small node hour
+    # Credits are then added up per month.
     slot_ms_by = defaultdict(float)
+    credits_by = defaultdict(float)
+    row_calcs = []
     for r in rows:
-        slot_ms_by[(tags[r["project_id"]], r["year_month"])] += r["total_slot_ms"]
+        key = r["year_month"]
+        cal_hours = minutes_in_month(r["year_month"]) / 60
+        active_hours = min(r["active_minutes_in_month"] / 60, cal_hours)
+        avg_slots = r["total_slot_ms"] / 3_600_000 / HOURS_PER_MONTH
+        row_nodes = avg_slots / SLOTS_PER_XS_NODE
+        row_credits = row_nodes * active_hours * CREDITS_PER_XS_NODE_HOUR
+        slot_ms_by[key] += r["total_slot_ms"]
+        credits_by[key] += row_credits
+        row_calcs.append({"project_id": r["project_id"], "month": r["year_month"],
+                          "slot_ms": r["total_slot_ms"], "avg_slots": avg_slots, "xs_nodes": row_nodes,
+                          "active_hours": active_hours, "credits": row_credits,
+                          "cost": row_credits * inp["price_per_credit"]})
 
-    # Steps 2-6 - per track, per month
+    # Effective utilization (display only) = credits / credits if every project ran all 730 hours
+    full = sum(slot_ms_by.values()) / 3_600_000 / SLOTS_PER_XS_NODE * CREDITS_PER_XS_NODE_HOUR
+    util = {"active_minutes": sum(r["active_minutes_in_month"] for r in rows),
+            "total_minutes": float(sum(minutes_in_month(r["year_month"]) for r in rows)),
+            "pct": (sum(credits_by.values()) / full) if full else 0.0,
+            "project_months": len(rows)}
+
+    # Per month (sum of that month's project rows) - used for results.json only
     monthly = []
     for m in months:
-        for t in TRACKS:
-            slot_ms = slot_ms_by[(t, m)]
-            slot_hours = slot_ms / 3_600_000
-            avg_slots = slot_hours / HOURS_PER_MONTH
-            xs_nodes = avg_slots / SLOTS_PER_XS_NODE
-            credits = xs_nodes * CREDITS_PER_XS_NODE_HOUR * HOURS_PER_MONTH * util[t]["pct"]
-            monthly.append({"month": m, "track": t, "slot_ms": slot_ms, "slot_hours": slot_hours,
-                            "avg_slots": avg_slots, "xs_nodes": xs_nodes, "credits": credits,
-                            "cost": credits * inp["price_per_credit"]})
+        slot_ms = slot_ms_by[m]
+        slot_hours = slot_ms / 3_600_000
+        avg_slots = slot_hours / HOURS_PER_MONTH
+        xs_nodes = avg_slots / SLOTS_PER_XS_NODE
+        credits = credits_by[m]  # sum of per-project credits
+        full = xs_nodes * CREDITS_PER_XS_NODE_HOUR * HOURS_PER_MONTH
+        monthly.append({"month": m, "slot_ms": slot_ms, "slot_hours": slot_hours,
+                        "util_pct": credits / full if full else 0.0,
+                        "avg_slots": avg_slots, "xs_nodes": xs_nodes, "credits": credits,
+                        "cost": credits * inp["price_per_credit"]})
 
-    # Steps 7-8 - average across the observation period, then combine
+    # Step 7 - average across the observation period = starting monthly credits
     n_months = len(months)
-    track_credits = {t: sum(x["credits"] for x in monthly if x["track"] == t) for t in TRACKS}
-    avg_credits = {t: track_credits[t] / n_months for t in TRACKS}
-    starting_credits = avg_credits["RES"] + avg_credits["OD"]
+    total_credits = sum(x["credits"] for x in monthly)
+    starting_credits = total_credits / n_months
 
-    # Steps 9-12 - 36-month projection
+    # Steps 8-11 - 36-month projection
     s_rates = [monthly_rate(g) for g in inp["storage_growth"]]
     c_rates = [monthly_rate(g) for g in inp["compute_growth"]]
     month1_tb = inp["initial_storage_tb"] * (1 + inp["tt_fs_pct"])
@@ -185,7 +203,7 @@ def calculate(rows: list[dict], months: list[str], tags: dict, inp: dict) -> dic
                      "storage_cost": tb * inp["price_per_tb"], "credits": cr,
                      "compute_cost": cr * inp["price_per_credit"]})
 
-    # Steps 13-14 - annual totals and range
+    # Steps 12-13 - annual totals and range
     years = []
     for y in (1, 2, 3):
         sub = [x for x in proj if x["year"] == y]
@@ -196,7 +214,7 @@ def calculate(rows: list[dict], months: list[str], tags: dict, inp: dict) -> dic
                       "credits": sum(x["credits"] for x in sub),
                       "end_tb": sub[-1]["storage_tb"]})
 
-    return {"util": util, "monthly": monthly, "track_credits": track_credits, "avg_credits": avg_credits,
+    return {"util": util, "monthly": monthly, "row_calcs": row_calcs, "total_credits": total_credits,
             "starting_credits": starting_credits, "s_rates": s_rates, "c_rates": c_rates,
             "month1_tb": month1_tb, "projection": proj, "years": years, "n_months": n_months}
 
@@ -266,7 +284,7 @@ def svg_stacked_bars(series: list[dict], labels: list[str], height=260, label_ev
 
 CSS = """
 :root { color-scheme: light dark;
-  --res: #2563eb; --od: #ea580c; --comb: #7c3aed; --stor: #0d9488;
+  --cmp: #2563eb; --accent: #ea580c; --comb: #7c3aed; --stor: #0d9488;
   --border: light-dark(#d1d5db, #374151); --muted: light-dark(#6b7280, #9ca3af);
   --card: light-dark(#f9fafb, #111827); --head: light-dark(#f3f4f6, #1f2937); }
 * { box-sizing: border-box; }
@@ -292,12 +310,12 @@ tr.total td { font-weight: 700; background: var(--head); }
 tr.calc td { font-weight: 700; }
 .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: .72rem; font-weight: 700;
   color: #fff; letter-spacing: .03em; }
-.b-res { background: var(--res); } .b-od { background: var(--od); }
+.b-compute { background: var(--cmp); }
 .b-combined { background: var(--comb); } .b-storage { background: var(--stor); }
-.tag-default { color: var(--muted); } .tag-override { color: var(--od); font-weight: 600; }
+.tag-default { color: var(--muted); } .tag-override { color: var(--accent); font-weight: 600; }
 .step { border: 1px solid var(--border); border-left: 5px solid var(--border); border-radius: 8px;
   padding: 10px 14px; margin: 10px 0; background: var(--card); }
-.step.res { border-left-color: var(--res); } .step.od { border-left-color: var(--od); }
+.step.compute { border-left-color: var(--cmp); }
 .step.combined { border-left-color: var(--comb); } .step.storage { border-left-color: var(--stor); }
 .step .hdr { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-weight: 600; }
 .step .num { color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -313,25 +331,22 @@ svg.chart { width: 100%; min-width: 520px; height: auto; display: block; }
 svg .grid { stroke: var(--border); stroke-width: 1; }
 svg .axis { fill: var(--muted); font-size: 11px; }
 svg .c-compute { fill: var(--comb); } svg .c-storage { fill: var(--stor); }
-svg .c-res { fill: var(--res); } svg .c-od { fill: var(--od); }
 .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: .85rem; margin: 4px 0 12px; }
 .leg i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
 .leg i.c-compute { background: var(--comb); } .leg i.c-storage { background: var(--stor); }
-.leg i.c-res { background: var(--res); } .leg i.c-od { background: var(--od); }
 ul.caveats li { margin-bottom: 6px; }
 .note { font-size: .85rem; color: var(--muted); }
-.callout { border: 1px solid var(--od); border-left: 5px solid var(--od); border-radius: 8px; padding: 10px 14px;
+.callout { border: 1px solid var(--accent); border-left: 5px solid var(--accent); border-radius: 8px; padding: 10px 14px;
   margin: 0 0 18px; background: light-dark(#fff7ed, #1c1206); font-size: .92rem; }
 """
 
 
-def build_html(r: dict, rows: list[dict], months: list[str], tags: dict, inp: dict,
+def build_html(r: dict, rows: list[dict], months: list[str], inp: dict,
                overridden: set, generated: str) -> str:
     cust = inp.get("customer") or "Customer"
     yrs = r["years"]
     pdf = r["projection"]
     first = months[0]
-    m0 = {x["track"]: x for x in r["monthly"] if x["month"] == first}
     source_files = sorted({x["source_file"] for x in rows})
     n_projects = len({x["project_id"] for x in rows})
 
@@ -347,16 +362,17 @@ def build_html(r: dict, rows: list[dict], months: list[str], tags: dict, inp: di
         "dataSources": [{"type": "file", "description": "BigQuery INFORMATION_SCHEMA.JOBS monthly usage exports (CSV)",
                          "files": source_files}],
         "parameters": {**{k: inp[k] for k in DEFAULTS}, "initial_storage_tb": inp["initial_storage_tb"],
-                       "observation_months": months, "project_tags": tags},
+                       "observation_months": months},
         "sections": [
-            {"id": "summary", "title": "Estimate summary"},
+            {"id": "observed", "title": "Observed-period total (matches the Google Slot Calculator)"},
+            {"id": "summary", "title": "3-year projection summary"},
             {"id": "inputs", "title": "Inputs"},
             {"id": "source-data", "title": "Source data"},
             {"id": "walkthrough", "title": "Calculation walkthrough"},
             {"id": "projection", "title": "36-month projection"},
             {"id": "caveats", "title": "Assumptions and caveats"}],
         "producerNotes": "Generated by bigquery-to-snowflake-estimate/scripts/estimate.py. Re-run the script "
-                         "with the same CSVs, inputs.json, and project_tags.json to refresh.",
+                         "with the same CSVs and inputs.json to refresh.",
     }
     meta_json = json.dumps(meta, indent=2).replace("</", "<\\/")
     out.append(f"""<!DOCTYPE html>
@@ -379,10 +395,39 @@ def build_html(r: dict, rows: list[dict], months: list[str], tags: dict, inp: di
 Use the <a href="{SLOT_CALCULATOR_URL}">Google Slot Calculator</a> Streamlit app for official estimates.</div>
 """)
 
-    # ---- 1. Summary
-    out.append('<h2 id="summary">Estimate summary</h2><div class="kpis">')
+    # ---- 1. Observed-period total: same result as the Google Slot Calculator app
+    proj_tot = defaultdict(lambda: {"months": 0, "credits": 0.0})
+    for x in r["row_calcs"]:
+        proj_tot[x["project_id"]]["months"] += 1
+        proj_tot[x["project_id"]]["credits"] += x["credits"]
+    ranked = sorted(proj_tot.items(), key=lambda kv: -kv[1]["credits"])
+    obs_cost = r["total_credits"] * inp["price_per_credit"]
+    out.append('<h2 id="observed">Observed-period total</h2>'
+               f'<p class="note">This is the figure the Google Slot Calculator reports for the same CSV and price per credit: '
+               f'every project is calculated month by month with its own measured active time, then the project totals are '
+               f'added together. Nothing is averaged across projects. Covers {month_label(months[0])} to '
+               f'{month_label(months[-1])} ({r["n_months"]} months).</p><div class="kpis">'
+               f'<div class="kpi"><div class="l">Snowflake total ({r["n_months"]} months)</div>'
+               f'<div class="v">{money(obs_cost, 2)}</div><div class="r">{num(r["total_credits"], 2)} credits x '
+               f'{money(inp["price_per_credit"], 2)}</div></div>'
+               f'<div class="kpi"><div class="l">Average per month</div><div class="v">{money(obs_cost / r["n_months"], 2)}</div>'
+               f'<div class="r">{num(r["starting_credits"], 2)} credits/month (projection baseline)</div></div></div>')
+    out.append('<div class="table-wrap"><table><thead><tr><th>Project</th><th class="n">Months</th>'
+               '<th class="n">Credits</th><th class="n">Snowflake cost</th></tr></thead><tbody>')
+    for pid, v in ranked:
+        out.append(f'<tr><td>{esc(pid)}</td><td class="n">{v["months"]}</td><td class="n">{num(v["credits"], 2)}</td>'
+                   f'<td class="n">{money(v["credits"] * inp["price_per_credit"], 2)}</td></tr>')
+    out.append(f'<tr class="total"><td>TOTAL (sum of {len(ranked)} project totals)</td>'
+               f'<td class="n">{sum(v["months"] for _, v in ranked)}</td><td class="n">{num(r["total_credits"], 2)}</td>'
+               f'<td class="n">{money(obs_cost, 2)}</td></tr></tbody></table></div>')
+
+    # ---- 2. 3-year projection summary
+    out.append('<h2 id="summary">3-year projection summary</h2>'
+               f'<p class="note">A forward projection, not the observed total above. Month 1 compute starts at the observed '
+               f'average of {num(r["starting_credits"], 2)} credits/month and grows at the compute growth rates; storage is '
+               f'added from the storage inputs.</p><div class="kpis">')
     for y in yrs:
-        out.append(f'<div class="kpi"><div class="l">Year {y["year"]} estimate</div>'
+        out.append(f'<div class="kpi"><div class="l">Year {y["year"]} projection</div>'
                    f'<div class="v">{money(y["total"])}</div>'
                    f'<div class="r">Range {money(y["low"])} to {money(y["high"])}</div></div>')
     out.append("</div>")
@@ -422,19 +467,18 @@ Use the <a href="{SLOT_CALCULATOR_URL}">Google Slot Calculator</a> Streamlit app
 
     # ---- 3. Source data
     out.append('<h2 id="source-data">Source data</h2>')
-    out.append(f'<p>{r["n_months"]} monthly exports, {len(rows)} project-month rows. '
-               f'Each project is tagged as reserved slots ({badge("RES")}) or on-demand ({badge("OD")}).</p>')
+    out.append(f'<p>{r["n_months"]} monthly exports, {len(rows)} project-month rows.</p>')
     proj = defaultdict(lambda: {"months": set(), "slot_ms": 0.0, "active": 0.0})
     for x in rows:
         p = proj[x["project_id"]]
         p["months"].add(x["year_month"])
         p["slot_ms"] += x["total_slot_ms"]
         p["active"] += x["active_minutes_in_month"]
-    out.append('<div class="table-wrap"><table><thead><tr><th>Project</th><th>Track</th>'
+    out.append('<div class="table-wrap"><table><thead><tr><th>Project</th>'
                '<th class="n">Months with activity</th><th class="n">Slot hours (total)</th>'
                '<th class="n">Active hours (total)</th></tr></thead><tbody>')
     for pid, row in sorted(proj.items(), key=lambda kv: kv[1]["slot_ms"], reverse=True):
-        out.append(f'<tr><td>{esc(pid)}</td><td>{badge(tags[pid])}</td><td class="n">{len(row["months"])}</td>'
+        out.append(f'<tr><td>{esc(pid)}</td><td class="n">{len(row["months"])}</td>'
                    f'<td class="n">{num(row["slot_ms"] / 3_600_000)}</td><td class="n">{num(row["active"] / 60, 1)}</td></tr>')
     out.append("</tbody></table></div>")
     rc = Counter(x["year_month"] for x in rows)
@@ -447,8 +491,8 @@ Use the <a href="{SLOT_CALCULATOR_URL}">Google Slot Calculator</a> Streamlit app
 
     # ---- 4. Walkthrough
     out.append('<h2 id="walkthrough">Calculation walkthrough</h2>')
-    out.append(f'<p class="note">Each step shows the formula, the numbers plugged in, and the result. Steps 2-6 run for every '
-               f'observed month. The worked example uses {month_label(first)}.</p>')
+    out.append('<p class="note">Each step shows the formula, the numbers plugged in, and the result. Compute follows '
+               'the same sequence as the Google Slot Calculator: per project, per month, then summed.</p>')
 
     def step(order, track, title, formula, plugged, result):
         out.append(f'<div class="step {track.lower()}"><div class="hdr"><span class="num">{esc(order)}</span>'
@@ -457,35 +501,56 @@ Use the <a href="{SLOT_CALCULATOR_URL}">Google Slot Calculator</a> Streamlit app
                    f'<dt>Plugged in</dt><dd><code>{esc(plugged)}</code></dd>'
                    f'<dt>Result</dt><dd class="result">{esc(result)}</dd></dl></div>')
 
-    out.append('<div class="phase">Part 1 - Compute: each track calculated separately</div>')
-    for t, o in (("RES", "1a"), ("OD", "1b")):
-        u = r["util"][t]
-        step(o, t, f"Utilization % ({TRACK_NAMES[t]})",
-             "Active Minutes / Total Minutes (across all active project-months)",
-             f'{num(u["active_minutes"])} / {num(u["total_minutes"])}', pct(u["pct"]))
-    for t, o in (("RES", "2a"), ("OD", "2b")):
-        step(o, t, "Slot hours", "Slot ms / 3,600,000",
-             f'{num(m0[t]["slot_ms"])} / 3,600,000', f'{num(m0[t]["slot_hours"], 1)} slot hours ({month_label(first)})')
-    for t, o in (("RES", "3a"), ("OD", "3b")):
-        step(o, t, "Average slots", "Slot Hours / Hours per Month",
-             f'{num(m0[t]["slot_hours"], 1)} / {HOURS_PER_MONTH}', f'{num(m0[t]["avg_slots"], 2)} slots')
-    for t, o in (("RES", "4a"), ("OD", "4b")):
-        step(o, t, "Equivalent X-Small nodes", "Average Slots / 16 slots per X-Small node",
-             f'{num(m0[t]["avg_slots"], 2)} / {SLOTS_PER_XS_NODE}', f'{num(m0[t]["xs_nodes"], 2)} X-Small nodes')
-    for t, o in (("RES", "5a"), ("OD", "5b")):
-        step(o, t, "Credits per month",
-             "X-Small Nodes x 1 credit/hr x Hours per Month x Utilization %",
-             f'{num(m0[t]["xs_nodes"], 2)} x 1 x {HOURS_PER_MONTH} x {pct(r["util"][t]["pct"])}',
-             f'{num(m0[t]["credits"])} credits')
-    for t, o in (("RES", "6a"), ("OD", "6b")):
-        step(o, t, "Monthly compute cost", "Credits per Month x Price per Credit",
-             f'{num(m0[t]["credits"])} x {money(inp["price_per_credit"], 2)}', money(m0[t]["cost"]))
-    for t, o in (("RES", "7a"), ("OD", "7b")):
-        tot = r["track_credits"][t]
-        step(o, t, "Average monthly credits", "SUM(Monthly Credits) / # Months Observed",
-             f'{num(tot)} / {r["n_months"]}', f'{num(r["avg_credits"][t])} credits/month')
-    step("8", "COMBINED", "Starting monthly credits", "Avg Monthly Credits RES + Avg Monthly Credits OD",
-         f'{num(r["avg_credits"]["RES"])} + {num(r["avg_credits"]["OD"])}', f'{num(r["starting_credits"])} credits/month')
+    # Worked example: the largest project in the first month. Steps 1-5 repeat for every project-month.
+    ex = max((x for x in r["row_calcs"] if x["month"] == first), key=lambda x: x["credits"])
+    ex_proj = [x for x in r["row_calcs"] if x["project_id"] == ex["project_id"]]
+    ex_hours = ex["slot_ms"] / 3_600_000
+    out.append('<div class="phase">Part 1 - Compute: every project and month calculated on its own</div>')
+    out.append(f'<p class="note">Worked example: {esc(ex["project_id"])}, {month_label(first)}. Steps 1-5 run for every '
+               f'project-month in the table below; no project is averaged with another.</p>')
+    step("1", "COMPUTE", "Slot hours (this project, this month)", "Slot ms / 3,600,000",
+         f'{num(ex["slot_ms"])} / 3,600,000', f'{num(ex_hours, 2)} slot hours')
+    step("2", "COMPUTE", "Average slots", f"Slot Hours / {HOURS_PER_MONTH} hours per month",
+         f'{num(ex_hours, 2)} / {HOURS_PER_MONTH}', f'{num(ex["avg_slots"], 3)} slots')
+    step("3", "COMPUTE", "Equivalent X-Small nodes (fractional)", f"Average Slots / {SLOTS_PER_XS_NODE} slots per X-Small node",
+         f'{num(ex["avg_slots"], 3)} / {SLOTS_PER_XS_NODE}', f'{num(ex["xs_nodes"], 4)} X-Small nodes')
+    step("4", "COMPUTE", "Measured active hours (real clock time)",
+         "active_minutes_in_month / 60 = wall-clock time with at least one query running, overlaps merged",
+         f'{num(ex["active_hours"] * 60, 1)} min / 60', f'{num(ex["active_hours"], 2)} active hours')
+    step("5", "COMPUTE", "Credits and cost (this project, this month)",
+         "X-Small Nodes x Active Hours x 1 credit per node hour; Cost = Credits x Price per Credit",
+         f'{num(ex["xs_nodes"], 4)} x {num(ex["active_hours"], 2)} x {money(inp["price_per_credit"], 2)}',
+         f'{num(ex["credits"], 2)} credits = {money(ex["cost"], 2)}')
+    step("6", "COMPUTE", "Project total", "SUM of that project's months",
+         " + ".join(num(x["credits"], 2) for x in ex_proj),
+         f'{num(sum(x["credits"] for x in ex_proj), 2)} credits = {money(sum(x["cost"] for x in ex_proj), 2)}')
+    step("7", "COMPUTE", "Snowflake total for the observed period", "SUM of all project totals",
+         f'{len({x["project_id"] for x in r["row_calcs"]})} project totals added together',
+         f'{num(r["total_credits"], 2)} credits = {money(r["total_credits"] * inp["price_per_credit"], 2)}')
+    step("8", "COMPUTE", "Projection baseline (month 1 credits)", "Snowflake Total Credits / # Months Observed (first to last data month, inclusive; a month with no rows counts as zero)",
+         f'{num(r["total_credits"], 2)} / {r["n_months"]}', f'{num(r["starting_credits"], 2)} credits/month')
+
+    out.append('<h3>Per-project credits (every project and month)</h3>'
+               '<p class="note">Each row is calculated on its own (steps 1-5); project totals (step 6) and the Snowflake total (step 7) are sums of these rows.</p>')
+    out.append('<div class="table-wrap"><table><thead><tr><th>Project</th><th>Month</th>'
+               '<th class="n">Slot ms</th><th class="n">Avg slots (ms / 3.6M / 730)</th>'
+               '<th class="n">X-Small nodes (slots / 16)</th><th class="n">Active hours</th>'
+               '<th class="n">Credits (nodes x hours)</th><th class="n">Cost</th></tr></thead><tbody>')
+    for pid in sorted({x["project_id"] for x in r["row_calcs"]},
+                      key=lambda p: -sum(x["credits"] for x in r["row_calcs"] if x["project_id"] == p)):
+        prow = sorted((x for x in r["row_calcs"] if x["project_id"] == pid), key=lambda x: x["month"])
+        for x in prow:
+            out.append(f'<tr><td>{esc(pid)}</td><td>{month_label(x["month"])}</td>'
+                       f'<td class="n">{num(x["slot_ms"])}</td><td class="n">{num(x["avg_slots"], 2)}</td>'
+                       f'<td class="n">{num(x["xs_nodes"], 3)}</td><td class="n">{num(x["active_hours"], 1)}</td>'
+                       f'<td class="n">{num(x["credits"], 2)}</td><td class="n">{money(x["cost"], 2)}</td></tr>')
+        out.append(f'<tr class="total"><td colspan="6">{esc(pid)} total ({len(prow)} months)</td>'
+                   f'<td class="n">{num(sum(x["credits"] for x in prow), 2)}</td>'
+                   f'<td class="n">{money(sum(x["cost"] for x in prow), 2)}</td></tr>')
+    all_cr = sum(x["credits"] for x in r["row_calcs"])
+    out.append(f'<tr class="total"><td colspan="6">All projects, all months</td><td class="n">{num(all_cr, 2)}</td>'
+               f'<td class="n">{money(all_cr * inp["price_per_credit"], 2)}</td></tr>')
+    out.append("</tbody></table></div>")
 
     out.append('<div class="phase">Part 2 - Storage</div>')
     step("9", "STORAGE", "Month 1 storage", "Initial Storage x (1 + Time Travel / Failsafe %)",
@@ -536,10 +601,15 @@ Use the <a href="{SLOT_CALCULATOR_URL}">Google Slot Calculator</a> Streamlit app
     for c in [
         f"16 BigQuery slots = 1 X-Small Snowflake node is a hardware comparison, not an exact performance match. "
         f"Actual throughput varies by workload (ETL, BI, ad hoc).",
-        f"The baseline averages {r['n_months']} months of usage. Short observation periods, one-time loads, or "
-        f"seasonal peaks outside the window make the estimate less reliable.",
-        "Utilization % is calculated across every project-month that had activity. Months where a project ran "
-        "no queries are not included.",
+        f"The observed-period total uses the same per-project, per-month calculation as the Google Slot Calculator. "
+        f"The 3-year projection starts from that total's monthly average over {r['n_months']} months: every calendar month "
+        f"from the first to the last month in the data (the app uses the same rule; a month with no rows counts as zero). Short "
+        f"periods, one-time loads, or seasonal peaks outside the window make the projection less reliable.",
+        "Active hours are each project's own measured wall-clock time with at least one query running (overlapping "
+        "queries merged, never averaged across projects). Nodes are fractional and are not rounded up. Months where "
+        "a project ran no queries are not included.",
+        "Snowflake does not charge for bytes scanned: compute is billed in credits only while a warehouse runs, "
+        "plus storage.",
         "Prices are " + ("customer contract values." if {"price_per_credit", "price_per_tb"} <= overridden
                          else "list-price defaults unless marked as customer values in Inputs."),
         f"The {pct(inp['low_factor'], 0)} / {pct(inp['high_factor'], 0)} range reflects estimation uncertainty "
@@ -556,12 +626,11 @@ def main():
     p = argparse.ArgumentParser(description="BigQuery to Snowflake cost estimate")
     p.add_argument("--csv", nargs="+", required=True, help="CSV files or a directory of CSVs")
     p.add_argument("--inputs", required=True, help="inputs.json")
-    p.add_argument("--tags", required=True, help="project_tags.json mapping project_id -> RES|OD")
     p.add_argument("--start", required=True, help="First day of the first month, YYYY-MM-01")
     p.add_argument("--end", required=True, help="First day of the month after the last month, YYYY-MM-01 (exclusive)")
     p.add_argument("--out", required=True, help="Output HTML path")
     p.add_argument("--results", help="Optional JSON file with all calculated values")
-    p.add_argument("--validate-only", action="store_true", help="Validate CSVs and tags, then exit")
+    p.add_argument("--validate-only", action="store_true", help="Validate CSVs, then exit")
     args = p.parse_args()
 
     raw = json.loads(Path(args.inputs).read_text())
@@ -569,11 +638,10 @@ def main():
     if "initial_storage_tb" not in inp:
         sys.exit("Error: inputs.json must include initial_storage_tb")
     overridden = {k for k in DEFAULTS if k in raw and raw[k] != DEFAULTS[k]}
-    tags = {str(k): str(v).upper() for k, v in json.loads(Path(args.tags).read_text()).items()}
     months = expected_months(args.start, args.end)
 
     rows = load_csvs(args.csv)
-    errors = validate(rows, months, tags)
+    errors = validate(rows, months)
     rows_per_month = dict(sorted(Counter(x["year_month"] for x in rows).items()))
     print("Rows per month:", json.dumps(rows_per_month))
     if errors:
@@ -582,23 +650,29 @@ def main():
             print(" -", e)
         sys.exit(2)
     print("Validation passed.")
+    span, warns = observed_span(rows, months)
+    for w in warns:
+        print("WARNING:", w)
+    print(f"Months used for the monthly average: {len(span)} ({span[0]} to {span[-1]})")
     if args.validate_only:
         return
+    months = span
 
-    r = calculate(rows, months, tags, inp)
-    report = build_html(r, rows, months, tags, inp, overridden, date.today().isoformat())
+    r = calculate(rows, months, inp)
+    report = build_html(r, rows, months, inp, overridden, date.today().isoformat())
     Path(args.out).write_text(report)
     print(f"Report: {args.out}")
 
     if args.results:
-        res = {"utilization": r["util"], "avg_monthly_credits": r["avg_credits"],
-               "starting_monthly_credits": r["starting_credits"], "month1_storage_tb": r["month1_tb"],
+        res = {"utilization": r["util"], "starting_monthly_credits": r["starting_credits"], "month1_storage_tb": r["month1_tb"],
                "years": r["years"], "monthly": r["monthly"], "projection": r["projection"]}
         Path(args.results).write_text(json.dumps(res, indent=2))
         print(f"Results: {args.results}")
 
+    print(f"Observed-period total ({r['n_months']} months, matches the app): {num(r['total_credits'], 2)} credits = "
+          f"{money(r['total_credits'] * inp['price_per_credit'], 2)}")
     for y in r["years"]:
-        print(f"Year {y['year']}: {money(y['low'])} | {money(y['total'])} | {money(y['high'])}")
+        print(f"Year {y['year']} projection: {money(y['low'])} | {money(y['total'])} | {money(y['high'])}")
 
 
 if __name__ == "__main__":

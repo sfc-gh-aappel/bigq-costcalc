@@ -3,14 +3,15 @@
 A Cortex Code (CoCo) skill that walks through, step by step, how a customer's BigQuery usage converts into an estimated Snowflake compute and storage cost, and produces an HTML report showing every calculation.
 
 > **This is an explainer, not the system of record.** Official estimates come from the
-> [Google Slot Calculator Streamlit app](https://app.snowflake.com/streamlit/sfcogsops/snowhouse_aws_us_west_2/#/apps/icosbexzbmbas7a4gzfw).
+> [Google Slot Calculator Streamlit app](https://app.snowflake.com/streamlit/sfcogsops/snowhouse_aws_us_west_2/#/apps/ki4qh2k5pei7xqdkpz7k).
+> The skill and the app use the same calculation and defaults, so for the same CSV and inputs they give the same numbers.
 
 ## Contents
 
 | Path | What it is |
 |---|---|
 | `bigquery-to-snowflake-estimate/` | The skill: `SKILL.md`, scripts, and the BigQuery query template |
-| `sample_estimate/` | A fictional "Sample Retail Co" run: input CSVs, `inputs.json`, `project_tags.json`, `results.json`, and the HTML report |
+| `sample_estimate/` | A fictional "Sample Retail Co" run: input CSVs, `inputs.json`, `results.json`, and the HTML report |
 | `docs/` | The Calculation Guide and one page per step (Steps 1–14). Worked examples use the Sample Retail Co numbers. |
 
 ## Requirements
@@ -37,8 +38,8 @@ In CoCo chat, type `/bigquery-to-snowflake-estimate` (or "explain the bigquery t
 
 1. Asks for the customer, date range, and BigQuery region, then generates **one** BigQuery query for the whole range.
 2. Collects inputs in one form (initial storage TB plus any overrides to the defaults).
-3. Takes the CSV the customer exports, tags projects (default **RES**; you list the **OD** ones), and validates.
-4. Runs every calculation in `scripts/estimate.py` and opens the HTML report.
+3. Takes the CSV the customer exports and validates it (it warns about months with no data).
+4. Runs every calculation in `scripts/estimate.py` and opens the HTML report. The report leads with the **observed-period total** (every project-month calculated on its own, then summed: the same number the app shows), followed by the Year 1-3 projection and range.
 
 Output goes to `<customer>_bq_estimate/` in your current project folder. That folder is ignored by git so customer data is never committed.
 
@@ -48,11 +49,11 @@ Output goes to `<customer>_bq_estimate/` in your current project folder. That fo
 cd bigq-costcalc
 K=~/.snowflake/cortex/skills/bigquery-to-snowflake-estimate
 uv run --project $K python $K/scripts/estimate.py \
-  --csv sample_estimate/csv --inputs sample_estimate/inputs.json --tags sample_estimate/project_tags.json \
+  --csv sample_estimate/csv --inputs sample_estimate/inputs.json \
   --start 2026-03-01 --end 2026-10-01 --out /tmp/sample_report.html && open /tmp/sample_report.html
 ```
 
-Expected: Year 1 $2,251,228, Year 2 $2,389,096, Year 3 $2,556,665 (calculated totals). The report should look exactly like `sample_estimate/Sample_Retail_Co_BigQuery_to_Snowflake_Estimate_2026-10-14.html`.
+Expected: observed total 337,111.77 credits = $1,348,447.08 (7 months); Year 1 $2,379,884, Year 2 $2,525,585, Year 3 $2,702,708 (calculated totals). The report should look like `sample_estimate/Sample_Retail_Co_BigQuery_to_Snowflake_Estimate_2026-11-07.html`.
 
 ## Report looks different?
 

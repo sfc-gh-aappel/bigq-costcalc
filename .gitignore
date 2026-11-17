@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Secrets / credentials
+.env
+.env.*
+*.pem
+*.p8
+*.key
+connections.toml
+.streamlit/
+
+# Generated estimates (customer reports, inputs, CSVs)
+*_bq_estimate/
+
+# IDE / OS
+.snowflake/
+.vscode/
+.idea/
+.DS_Store
